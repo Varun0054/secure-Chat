@@ -19,9 +19,12 @@ class ChatController with ChangeNotifier {
 
   Future<void> _initializeChat() async {
     debugPrint('ChatController: Initializing for room $roomId');
-    await loadLocalMessages();
-    await syncMessages();
+    // 1. Subscribe FIRST to avoid missing messages between sync and subscribe
     subscribeToMessages();
+    // 2. Load local cache
+    await loadLocalMessages();
+    // 3. Sync from remote
+    await syncMessages();
   }
 
   Future<void> loadLocalMessages() async {
@@ -78,10 +81,12 @@ class ChatController with ChangeNotifier {
 
   void subscribeToMessages() {
     debugPrint('ChatController: Subscribing to real-time for room $roomId');
+    
+    // Using a simpler, unique channel name
     _subscription = Supabase.instance.client
-        .channel('public:messages:room:$roomId')
+        .channel('room-channel:$roomId')
         .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
+          event: PostgresChangeEvent.all, // Listen to INSERT, UPDATE, DELETE
           schema: 'public',
           table: 'messages',
           filter: PostgresChangeFilter(
@@ -90,29 +95,59 @@ class ChatController with ChangeNotifier {
             value: roomId,
           ),
           callback: (payload) async {
-            final newMessage = payload.newRecord;
-            debugPrint(
-              'ChatController: Real-time message received: ${newMessage['id']}',
-            );
+            debugPrint('ChatController: Real-time payload received: ${payload.eventType}');
+            
+            if (payload.eventType == PostgresChangeEvent.insert) {
+              final newMessage = payload.newRecord;
+              
+              // 1. Avoid duplicate if we already added it (either optimistically or via sync)
+              final alreadyExists = _messages.any(
+                (m) => m['id'].toString() == newMessage['id'].toString(),
+              );
 
-            // Avoid duplicate if we already added it optimistically
-            final alreadyExists = _messages.any(
-              (m) => m['id'] == newMessage['id'],
-            );
-            if (!alreadyExists) {
-              try {
-                await LocalDatabaseService.saveMessage(newMessage);
-              } catch (e) {
-                debugPrint(
-                  'ChatController: Error saving real-time message locally: $e',
-                );
+              if (!alreadyExists) {
+                // 2. Save to local DB for persistence
+                try {
+                  await LocalDatabaseService.saveMessage(newMessage);
+                } catch (e) {
+                  debugPrint('ChatController ERR: saving real-time message: $e');
+                }
+                
+                // 3. Add to UI and sort
+                _messages.add(Map<String, dynamic>.from(newMessage));
+                _sortMessages();
+                notifyListeners();
               }
-              _messages.add(newMessage);
-              notifyListeners();
+            } else if (payload.eventType == PostgresChangeEvent.update) {
+              final updatedRecord = payload.newRecord;
+              
+              final index = _messages.indexWhere(
+                (m) => m['id'].toString() == updatedRecord['id'].toString(),
+              );
+              
+              if (index != -1) {
+                _messages[index] = Map<String, dynamic>.from(updatedRecord);
+                _sortMessages();
+                notifyListeners();
+              }
             }
           },
         )
-        .subscribe();
+        .subscribe((status, [error]) {
+          debugPrint('ChatController: Real-time status: $status');
+          if (error != null) {
+            debugPrint('ChatController REALTIME ERR: $error');
+          }
+        });
+  }
+
+  void _sortMessages() {
+    // Ensure accurate timing-based ordering
+    _messages.sort((a, b) {
+      final aTime = DateTime.parse(a['created_at']).toLocal();
+      final bTime = DateTime.parse(b['created_at']).toLocal();
+      return aTime.compareTo(bTime);
+    });
   }
 
   Future<void> sendMessage(String content) async {
@@ -142,9 +177,12 @@ class ChatController with ChangeNotifier {
       );
 
       // Optimistically add to UI immediately
-      final alreadyExists = _messages.any((m) => m['id'] == response['id']);
+      final alreadyExists = _messages.any(
+        (m) => m['id'].toString() == response['id'].toString(),
+      );
       if (!alreadyExists) {
         _messages.add(Map<String, dynamic>.from(response));
+        _sortMessages();
         notifyListeners();
       }
 

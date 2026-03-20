@@ -15,7 +15,12 @@ class LocalDatabaseService {
     try {
       final dbPath = await getDatabasesPath();
       final path = join(dbPath, filePath);
-      return await openDatabase(path, version: 1, onCreate: _createDB);
+      return await openDatabase(
+        path, 
+        version: 2, 
+        onCreate: _createDB,
+        onUpgrade: _upgradeDB,
+      );
     } catch (e) {
       debugPrint('Database initialization error: $e');
       rethrow;
@@ -42,6 +47,25 @@ class LocalDatabaseService {
         FOREIGN KEY (room_id) REFERENCES rooms (id) ON DELETE CASCADE
       )
     ''');
+
+    // Key-Value store for offline caching
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS key_value_store (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    ''');
+  }
+
+  static Future _upgradeDB(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS key_value_store (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+      ''');
+    }
   }
 
   /// Sanitize a message map to only include columns the SQLite schema supports.
@@ -163,5 +187,29 @@ class LocalDatabaseService {
     final db = await database;
     await db.delete('messages');
     await db.delete('rooms');
+    await db.delete('key_value_store');
+  }
+
+  // --- Key-Value Cache Operations ---
+  static Future<void> saveCacheString(String key, String value) async {
+    final db = await database;
+    await db.insert('key_value_store', {
+      'key': key,
+      'value': value,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<String?> getCacheString(String key) async {
+    final db = await database;
+    final result = await db.query(
+      'key_value_store',
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    if (result.isNotEmpty) {
+      return result.first['value'] as String?;
+    }
+    return null;
   }
 }

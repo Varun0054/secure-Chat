@@ -1,11 +1,54 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'dart:async';
 
 import '../../controller/login_controller.dart';
 
-class LoginView extends StatelessWidget {
-  LoginView({super.key});
+class LoginView extends StatefulWidget {
+  const LoginView({super.key});
 
+  @override
+  State<LoginView> createState() => _LoginViewState();
+}
+
+class _LoginViewState extends State<LoginView> {
   final LoginController _controller = LoginController();
+  late final StreamSubscription<AuthState> _authStateSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _authStateSubscription = Supabase.instance.client.auth.onAuthStateChange.listen((data) async {
+      if (data.session != null) {
+        final user = data.session!.user;
+        try {
+          final profile = await Supabase.instance.client
+              .from('profiles')
+              .select()
+              .eq('id', user.id)
+              .maybeSingle();
+
+          if (mounted) {
+            if (profile != null && profile['username'] != null && profile['username'].toString().isNotEmpty) {
+              Navigator.pushNamedAndRemoveUntil(context, '/dashboard', (route) => false);
+            } else {
+              Navigator.pushNamedAndRemoveUntil(context, '/create_username', (route) => false);
+            }
+          }
+        } catch (e) {
+          if (mounted) {
+            Navigator.pushNamedAndRemoveUntil(context, '/create_username', (route) => false);
+          }
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _authStateSubscription.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

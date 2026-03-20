@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../controller/chat_controller.dart';
 import '../components/glass_container.dart';
+import 'package:intl/intl.dart';
 
 class ChatView extends StatefulWidget {
   const ChatView({super.key});
@@ -163,14 +164,34 @@ class _ChatViewState extends State<ChatView> {
                                   ),
                                 ],
                               ),
-                              child: Text(
-                                message['content'],
-                                style: TextStyle(
-                                  color: isMe
-                                      ? Colors.white
-                                      : theme.textTheme.bodyLarge?.color,
-                                  fontSize: 15,
-                                ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    message['content'],
+                                    style: TextStyle(
+                                      color: isMe
+                                          ? Colors.white
+                                          : theme.textTheme.bodyLarge?.color,
+                                      fontSize: 15,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    DateFormat('hh:mm a').format(
+                                      DateTime.parse(message['created_at'])
+                                          .toLocal(),
+                                    ),
+                                    style: TextStyle(
+                                      color: isMe
+                                          ? Colors.white.withValues(alpha: 0.7)
+                                          : theme.textTheme.bodySmall?.color
+                                              ?.withValues(alpha: 0.5),
+                                      fontSize: 10,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           );

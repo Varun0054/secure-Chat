@@ -163,7 +163,7 @@ class _DashboardViewState extends State<DashboardView> {
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(
-                                  Icons.people_outline,
+                                  _controller.isOffline ? Icons.wifi_off_rounded : Icons.people_outline,
                                   size: 48,
                                   color: theme.iconTheme.color?.withValues(
                                     alpha: 0.2,
@@ -171,7 +171,7 @@ class _DashboardViewState extends State<DashboardView> {
                                 ),
                                 const SizedBox(height: 16),
                                 Text(
-                                  "No friends yet",
+                                  _controller.isOffline ? "No internet connection" : "No friends yet",
                                   style: TextStyle(
                                     color: theme.textTheme.bodyMedium?.color
                                         ?.withValues(alpha: 0.4),
@@ -179,12 +179,20 @@ class _DashboardViewState extends State<DashboardView> {
                                   ),
                                 ),
                                 const SizedBox(height: 16),
-                                ElevatedButton(
-                                  onPressed: () {
-                                    Navigator.pushNamed(context, '/search');
-                                  },
-                                  child: const Text("Find People"),
-                                ),
+                                if (!_controller.isOffline)
+                                  ElevatedButton(
+                                    onPressed: () {
+                                      Navigator.pushNamed(context, '/search');
+                                    },
+                                    child: const Text("Find People"),
+                                  )
+                                else
+                                  ElevatedButton(
+                                    onPressed: () {
+                                      _controller.fetchUserProfile();
+                                    },
+                                    child: const Text("Retry Sync"),
+                                  ),
                               ],
                             ),
                           ),

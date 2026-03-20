@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/local_database_service.dart';
 
 class SplashView extends StatefulWidget {
   const SplashView({super.key});
@@ -21,13 +22,58 @@ class _SplashViewState extends State<SplashView> {
 
     if (!mounted) return;
 
-    final session = Supabase.instance.client.auth.currentSession;
-    final bool isLoggedIn = session != null;
+    try {
+      final session = Supabase.instance.client.auth.currentSession;
+      final bool isLoggedIn = session != null;
 
-    if (isLoggedIn) {
-      Navigator.pushReplacementNamed(context, '/dashboard');
-    } else {
-      Navigator.pushReplacementNamed(context, '/login');
+      if (isLoggedIn) {
+        try {
+          // Timeout added to prevent infinite hanging when internet is poor or disconnected
+          final profile = await Supabase.instance.client
+              .from('profiles')
+              .select()
+              .eq('id', session.user.id)
+              .maybeSingle()
+              .timeout(const Duration(seconds: 7));
+
+          if (!mounted) return;
+
+          if (profile != null && profile['username'] != null && profile['username'].toString().isNotEmpty) {
+            try {
+              await LocalDatabaseService.saveCacheString('current_username', profile['username'].toString());
+            } catch (e) {
+              debugPrint('LocalDB error while saving username: $e');
+            }
+            Navigator.pushReplacementNamed(context, '/dashboard');
+          } else {
+            Navigator.pushReplacementNamed(context, '/create_username');
+          }
+        } catch (e) {
+          debugPrint('Network/Supabase error in splash: $e');
+          // Fallback to local cache if offline/failed
+          try {
+            final cachedUsername = await LocalDatabaseService.getCacheString('current_username');
+            if (!mounted) return;
+            if (cachedUsername != null && cachedUsername.isNotEmpty) {
+              Navigator.pushReplacementNamed(context, '/dashboard');
+            } else {
+              Navigator.pushReplacementNamed(context, '/create_username');
+            }
+          } catch (cacheError) {
+            debugPrint('LocalDB cache error in splash fallback: $cacheError');
+            if (!mounted) return;
+            // Unhandled exception here means no local db (e.g. Chrome/Web or unsupported desktop without ffi)
+            Navigator.pushReplacementNamed(context, '/dashboard'); // Assume logged in if auth is valid, dash will handle rest.
+          }
+        }
+      } else {
+        Navigator.pushReplacementNamed(context, '/login');
+      }
+    } catch (e) {
+      debugPrint('Unexpected error in splash check: $e');
+      if (mounted) {
+        Navigator.pushReplacementNamed(context, '/login');
+      }
     }
   }
 
