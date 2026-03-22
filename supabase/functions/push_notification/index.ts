@@ -170,11 +170,8 @@ serve(async (req) => {
     // 5. Generate OAuth 2.0 access token using Service Account JWT flow
     const accessToken = await getOAuthAccessToken(serviceAccount);
 
-    // 6. Trim long messages for notification body
-    const maxLen = 80;
-    const notificationBody = content.length > maxLen
-      ? content.substring(0, maxLen) + '...'
-      : content;
+    // 6. Protect E2EE Content: Never expose the encrypted JSON payload in the push notification body
+    const notificationBody = '🔒 Sent you a new message';
 
     // 7. Build FCM v1 payload
     const fcmPayload = {

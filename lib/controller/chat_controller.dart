@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/local_database_service.dart';
+import '../services/encryption_service.dart';
 
 class ChatController with ChangeNotifier {
   final String roomId;
@@ -19,14 +20,27 @@ class ChatController with ChangeNotifier {
 
   Future<void> _initializeChat() async {
     debugPrint('ChatController: Initializing for room $roomId');
-    // 1. Load local cache first — makes UI ready immediately (offline-safe)
     await loadLocalMessages();
-    // 2. Subscribe to real-time updates (no-op if offline)
     subscribeToMessages();
-    // 3. Sync from remote (skipped gracefully if offline)
     await syncMessages();
-    // 4. Mark unread messages as read (skipped gracefully if offline)
     await markMessagesAsRead();
+  }
+
+  Future<Map<String, dynamic>> _decryptMessageRecord(Map<String, dynamic> rawMsg) async {
+    try {
+      final decryptedContent = await EncryptionService().decryptMessage(roomId, rawMsg['content']);
+      final decryptedMsg = Map<String, dynamic>.from(rawMsg);
+      decryptedMsg['content'] = decryptedContent;
+      return decryptedMsg;
+    } catch (e) {
+      debugPrint('Failure decrypting message ${rawMsg['id']}: $e');
+      final fallbackMsg = Map<String, dynamic>.from(rawMsg);
+      if (!rawMsg['content'].toString().startsWith('{')) {
+         return fallbackMsg; 
+      }
+      fallbackMsg['content'] = '🔒 Encryption Error: ${e.toString()}';
+      return fallbackMsg;
+    }
   }
 
   Future<void> loadLocalMessages() async {
@@ -45,32 +59,24 @@ class ChatController with ChangeNotifier {
 
   Future<void> syncMessages() async {
     try {
-      final lastTimestamp = await LocalDatabaseService.getLastMessageTimestamp(
-        roomId,
-      );
+      final lastTimestamp = await LocalDatabaseService.getLastMessageTimestamp(roomId);
       debugPrint('ChatController: Syncing from timestamp: $lastTimestamp');
 
-      var query = Supabase.instance.client
-          .from('messages')
-          .select()
-          .eq('room_id', roomId);
-
+      var query = Supabase.instance.client.from('messages').select().eq('room_id', roomId);
       if (lastTimestamp != null) {
         query = query.gt('created_at', lastTimestamp);
       }
 
-      final response = await query
-          .order('created_at', ascending: true)
-          .timeout(const Duration(seconds: 10));
+      final response = await query.order('created_at', ascending: true).timeout(const Duration(seconds: 10));
 
       if ((response as List).isNotEmpty) {
-        final List<Map<String, dynamic>> newMessages =
-            List<Map<String, dynamic>>.from(response);
-        debugPrint(
-          'ChatController: Found ${newMessages.length} new remote messages',
-        );
+        final List<Map<String, dynamic>> newMessages = [];
+        for (var rawMsg in response) {
+          newMessages.add(await _decryptMessageRecord(rawMsg));
+        }
 
-        // Scan for messages sent to me that are still 'sent' and mark them delivered
+        debugPrint('ChatController: Found ${newMessages.length} new remote messages');
+
         final currentUserId = Supabase.instance.client.auth.currentUser?.id;
         for (var msg in newMessages) {
           if (msg['sender_id'] != currentUserId && msg['status'] == 'sent') {
@@ -88,7 +94,6 @@ class ChatController with ChangeNotifier {
         debugPrint('ChatController: No new remote messages');
       }
     } catch (e) {
-      // Offline or timeout — local messages are already shown, so this is fine
       debugPrint('ChatController: Sync skipped (offline?): $e');
     }
   }
@@ -111,23 +116,16 @@ class ChatController with ChangeNotifier {
               debugPrint('ChatController: Real-time payload: ${payload.eventType}');
 
               if (payload.eventType == PostgresChangeEvent.insert) {
-                final newMessage = payload.newRecord;
-                final currentUserId =
-                    Supabase.instance.client.auth.currentUser?.id;
+                final newMessage = await _decryptMessageRecord(payload.newRecord);
+                final currentUserId = Supabase.instance.client.auth.currentUser?.id;
 
-                // If I am the receiver and on screen, mark as read directly
-                if (newMessage['sender_id'] != currentUserId &&
-                    newMessage['status'] != 'read') {
+                if (newMessage['sender_id'] != currentUserId && newMessage['status'] != 'read') {
                   markMessageAsReadIndividual(newMessage['id']);
-                } else if (newMessage['sender_id'] != currentUserId &&
-                    newMessage['status'] == 'sent') {
-                  // If I'm receive but not marking as read, at least mark delivered
+                } else if (newMessage['sender_id'] != currentUserId && newMessage['status'] == 'sent') {
                   markMessageAsDelivered(newMessage);
                 }
 
-                final alreadyExists = _messages.any(
-                  (m) => m['id'].toString() == newMessage['id'].toString(),
-                );
+                final alreadyExists = _messages.any((m) => m['id'].toString() == newMessage['id'].toString());
 
                 if (!alreadyExists) {
                   try {
@@ -141,17 +139,24 @@ class ChatController with ChangeNotifier {
                   notifyListeners();
                 }
               } else if (payload.eventType == PostgresChangeEvent.update) {
+                // For updates (like status read/delivered), we do not remap the entire content usually, 
+                // but just to be safe if content updated for some reason, we decode. 
+                // However, standard updates just change the status, and since content hasn't changed, 
+                // re-decrypting might be fine or we can just merge.
+                // Re-decrypting is safest if Supabase sends full record back.
                 final updatedRecord = payload.newRecord;
-
-                final index = _messages.indexWhere(
-                  (m) => m['id'].toString() == updatedRecord['id'].toString(),
-                );
+                final index = _messages.indexWhere((m) => m['id'].toString() == updatedRecord['id'].toString());
 
                 if (index != -1) {
-                  // Perform a partial update to avoid losing fields if payload is incomplete
-                  final Map<String, dynamic> existingMsg =
-                      Map<String, dynamic>.from(_messages[index]);
-                  existingMsg.addAll(Map<String, dynamic>.from(updatedRecord));
+                  final existingMsg = Map<String, dynamic>.from(_messages[index]);
+                  // Decode if content is present and differs (though content is immutable mostly)
+                  if (updatedRecord.containsKey('content')) {
+                     final decryptedUpdate = await _decryptMessageRecord(updatedRecord);
+                     existingMsg.addAll(Map<String, dynamic>.from(decryptedUpdate));
+                  } else {
+                     existingMsg.addAll(Map<String, dynamic>.from(updatedRecord));
+                  }
+                  
                   _messages[index] = existingMsg;
 
                   try {
@@ -168,7 +173,6 @@ class ChatController with ChangeNotifier {
           )
           .subscribe();
     } catch (e) {
-      // Offline — subscription silently skipped; local messages are shown
       debugPrint('ChatController: Real-time subscription failed (offline?): $e');
     }
   }
@@ -178,7 +182,6 @@ class ChatController with ChangeNotifier {
       final currentUserId = Supabase.instance.client.auth.currentUser?.id;
       if (currentUserId == null) return;
 
-      // Update in Supabase
       await Supabase.instance.client
           .from('messages')
           .update({
@@ -242,28 +245,38 @@ class ChatController with ChangeNotifier {
       final currentUserId = Supabase.instance.client.auth.currentUser?.id;
       if (currentUserId == null) return;
 
+      // Ensure encryption is fully active before allowing a message to leave the device
+      if (!EncryptionService().isRoomKeyCached(roomId)) {
+         throw Exception('Critical error: Cannot encrypt message, room key missing from RAM.');
+      }
+
+      // Encrypt the payload securely
+      final encryptedPayload = await EncryptionService().encryptMessage(roomId, content.trim());
+
       final response = await Supabase.instance.client
           .from('messages')
           .insert({
             'sender_id': currentUserId,
             'room_id': roomId,
-            'content': content.trim(),
+            'content': encryptedPayload, // Ciphertext JSON string sent
             'status': 'sent',
           })
           .select()
           .single();
 
+      final decryptedResponse = await _decryptMessageRecord(response);
+
       final alreadyExists = _messages.any(
-        (m) => m['id'].toString() == response['id'].toString(),
+        (m) => m['id'].toString() == decryptedResponse['id'].toString(),
       );
       if (!alreadyExists) {
-        _messages.add(Map<String, dynamic>.from(response));
+        _messages.add(Map<String, dynamic>.from(decryptedResponse));
         _sortMessages();
         notifyListeners();
       }
 
       try {
-        await LocalDatabaseService.saveMessage(response);
+        await LocalDatabaseService.saveMessage(decryptedResponse);
       } catch (e) {
         debugPrint('ChatController: Error saving sent message locally: $e');
       }

@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:convert';
 import '../utils/chat_utils.dart';
 import '../services/local_database_service.dart';
+import '../services/encryption_service.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 
 class DashboardController with ChangeNotifier {
@@ -50,8 +51,18 @@ class DashboardController with ChangeNotifier {
   }
 
   Future<void> fetchUserProfile() async {
+    // 0. Initialize Encryption Service (Identity Persistence)
+    try {
+      await EncryptionService().initialize();
+    } catch (e) {
+      debugPrint('Error initializing EncryptionService: $e');
+    }
+
     // 1. Source of Truth: Always load local database first
     await loadLocalData();
+
+    // 1.5 Sync Public Key to Supabase if not offline
+    await _syncPublicKey();
 
     // 2. Background Sync (Network)
     await _syncNetworkData();
@@ -61,6 +72,24 @@ class DashboardController with ChangeNotifier {
 
     // 4. Setup Global Message Status Listener (for 'delivered' status)
     _setupGlobalMessageListener();
+  }
+
+  Future<void> _syncPublicKey() async {
+    try {
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user == null || !EncryptionService().isInitialized) return;
+
+      final publicKeyB64 = await EncryptionService().getPublicKeyBase64();
+      if (publicKeyB64 != null) {
+        await Supabase.instance.client
+            .from('profiles')
+            .update({'public_key': publicKeyB64})
+            .eq('id', user.id);
+        debugPrint('Dashboard: Synced E2EE Public Key to Supabase.');
+      }
+    } catch (e) {
+      debugPrint('Dashboard: Failed to sync public key (offline?): $e');
+    }
   }
 
   Future<void> _setupFCMToken() async {
@@ -313,6 +342,7 @@ class DashboardController with ChangeNotifier {
 
   Future<void> logout(BuildContext context) async {
     await LocalDatabaseService.clearAll(); // Clear caches
+    await EncryptionService().deletePersistentIdentity(); // Clear cryptographic identity
     await Supabase.instance.client.auth.signOut();
     if (context.mounted) {
       Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
