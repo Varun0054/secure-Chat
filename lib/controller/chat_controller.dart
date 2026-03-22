@@ -19,12 +19,14 @@ class ChatController with ChangeNotifier {
 
   Future<void> _initializeChat() async {
     debugPrint('ChatController: Initializing for room $roomId');
-    // 1. Subscribe FIRST to avoid missing messages between sync and subscribe
-    subscribeToMessages();
-    // 2. Load local cache
+    // 1. Load local cache first — makes UI ready immediately (offline-safe)
     await loadLocalMessages();
-    // 3. Sync from remote
+    // 2. Subscribe to real-time updates (no-op if offline)
+    subscribeToMessages();
+    // 3. Sync from remote (skipped gracefully if offline)
     await syncMessages();
+    // 4. Mark unread messages as read (skipped gracefully if offline)
+    await markMessagesAsRead();
   }
 
   Future<void> loadLocalMessages() async {
@@ -57,7 +59,9 @@ class ChatController with ChangeNotifier {
         query = query.gt('created_at', lastTimestamp);
       }
 
-      final response = await query.order('created_at', ascending: true);
+      final response = await query
+          .order('created_at', ascending: true)
+          .timeout(const Duration(seconds: 10));
 
       if ((response as List).isNotEmpty) {
         final List<Map<String, dynamic>> newMessages =
@@ -65,6 +69,15 @@ class ChatController with ChangeNotifier {
         debugPrint(
           'ChatController: Found ${newMessages.length} new remote messages',
         );
+
+        // Scan for messages sent to me that are still 'sent' and mark them delivered
+        final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+        for (var msg in newMessages) {
+          if (msg['sender_id'] != currentUserId && msg['status'] == 'sent') {
+            markMessageAsDelivered(msg);
+          }
+        }
+
         await LocalDatabaseService.saveMessages(newMessages);
 
         final updatedMsgs = await LocalDatabaseService.getMessages(roomId);
@@ -75,74 +88,146 @@ class ChatController with ChangeNotifier {
         debugPrint('ChatController: No new remote messages');
       }
     } catch (e) {
-      debugPrint('ChatController: Error syncing messages: $e');
+      // Offline or timeout — local messages are already shown, so this is fine
+      debugPrint('ChatController: Sync skipped (offline?): $e');
     }
   }
 
   void subscribeToMessages() {
     debugPrint('ChatController: Subscribing to real-time for room $roomId');
-    
-    // Using a simpler, unique channel name
-    _subscription = Supabase.instance.client
-        .channel('room-channel:$roomId')
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all, // Listen to INSERT, UPDATE, DELETE
-          schema: 'public',
-          table: 'messages',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'room_id',
-            value: roomId,
-          ),
-          callback: (payload) async {
-            debugPrint('ChatController: Real-time payload received: ${payload.eventType}');
-            
-            if (payload.eventType == PostgresChangeEvent.insert) {
-              final newMessage = payload.newRecord;
-              
-              // 1. Avoid duplicate if we already added it (either optimistically or via sync)
-              final alreadyExists = _messages.any(
-                (m) => m['id'].toString() == newMessage['id'].toString(),
-              );
+    try {
+      _subscription = Supabase.instance.client
+          .channel('room-channel:$roomId')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'messages',
+            filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'room_id',
+              value: roomId,
+            ),
+            callback: (payload) async {
+              debugPrint('ChatController: Real-time payload: ${payload.eventType}');
 
-              if (!alreadyExists) {
-                // 2. Save to local DB for persistence
-                try {
-                  await LocalDatabaseService.saveMessage(newMessage);
-                } catch (e) {
-                  debugPrint('ChatController ERR: saving real-time message: $e');
+              if (payload.eventType == PostgresChangeEvent.insert) {
+                final newMessage = payload.newRecord;
+                final currentUserId =
+                    Supabase.instance.client.auth.currentUser?.id;
+
+                // If I am the receiver and on screen, mark as read directly
+                if (newMessage['sender_id'] != currentUserId &&
+                    newMessage['status'] != 'read') {
+                  markMessageAsReadIndividual(newMessage['id']);
+                } else if (newMessage['sender_id'] != currentUserId &&
+                    newMessage['status'] == 'sent') {
+                  // If I'm receive but not marking as read, at least mark delivered
+                  markMessageAsDelivered(newMessage);
                 }
-                
-                // 3. Add to UI and sort
-                _messages.add(Map<String, dynamic>.from(newMessage));
-                _sortMessages();
-                notifyListeners();
+
+                final alreadyExists = _messages.any(
+                  (m) => m['id'].toString() == newMessage['id'].toString(),
+                );
+
+                if (!alreadyExists) {
+                  try {
+                    await LocalDatabaseService.saveMessage(newMessage);
+                  } catch (e) {
+                    debugPrint('ChatController ERR: saving real-time message: $e');
+                  }
+
+                  _messages.add(Map<String, dynamic>.from(newMessage));
+                  _sortMessages();
+                  notifyListeners();
+                }
+              } else if (payload.eventType == PostgresChangeEvent.update) {
+                final updatedRecord = payload.newRecord;
+
+                final index = _messages.indexWhere(
+                  (m) => m['id'].toString() == updatedRecord['id'].toString(),
+                );
+
+                if (index != -1) {
+                  // Perform a partial update to avoid losing fields if payload is incomplete
+                  final Map<String, dynamic> existingMsg =
+                      Map<String, dynamic>.from(_messages[index]);
+                  existingMsg.addAll(Map<String, dynamic>.from(updatedRecord));
+                  _messages[index] = existingMsg;
+
+                  try {
+                    await LocalDatabaseService.saveMessage(existingMsg);
+                  } catch (e) {
+                    debugPrint('ChatController ERR: saving update to local: $e');
+                  }
+
+                  _sortMessages();
+                  notifyListeners();
+                }
               }
-            } else if (payload.eventType == PostgresChangeEvent.update) {
-              final updatedRecord = payload.newRecord;
-              
-              final index = _messages.indexWhere(
-                (m) => m['id'].toString() == updatedRecord['id'].toString(),
-              );
-              
-              if (index != -1) {
-                _messages[index] = Map<String, dynamic>.from(updatedRecord);
-                _sortMessages();
-                notifyListeners();
-              }
-            }
-          },
-        )
-        .subscribe((status, [error]) {
-          debugPrint('ChatController: Real-time status: $status');
-          if (error != null) {
-            debugPrint('ChatController REALTIME ERR: $error');
-          }
-        });
+            },
+          )
+          .subscribe();
+    } catch (e) {
+      // Offline — subscription silently skipped; local messages are shown
+      debugPrint('ChatController: Real-time subscription failed (offline?): $e');
+    }
+  }
+
+  Future<void> markMessagesAsRead() async {
+    try {
+      final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+      if (currentUserId == null) return;
+
+      // Update in Supabase
+      await Supabase.instance.client
+          .from('messages')
+          .update({
+            'status': 'read',
+            'read_at': DateTime.now().toIso8601String(),
+          })
+          .eq('room_id', roomId)
+          .neq('sender_id', currentUserId)
+          .neq('status', 'read');
+
+      debugPrint('ChatController: Marked messages as read in room $roomId');
+    } catch (e) {
+      debugPrint('ChatController: Error marking messages as read: $e');
+    }
+  }
+
+  Future<void> markMessageAsReadIndividual(String messageId) async {
+    try {
+      await Supabase.instance.client
+          .from('messages')
+          .update({
+            'status': 'read',
+            'read_at': DateTime.now().toIso8601String(),
+          })
+          .eq('id', messageId);
+      
+      debugPrint('ChatController: Marked individual msg $messageId as read');
+    } catch (e) {
+      debugPrint('ChatController: Error marking single message read: $e');
+    }
+  }
+
+  Future<void> markMessageAsDelivered(Map<String, dynamic> message) async {
+    try {
+      await Supabase.instance.client
+          .from('messages')
+          .update({
+            'status': 'delivered',
+            'delivered_at': DateTime.now().toIso8601String(),
+          })
+          .eq('id', message['id']);
+      
+      debugPrint('ChatController: Marked message ${message['id']} as delivered');
+    } catch (e) {
+      debugPrint('ChatController: Error marking message delivered: $e');
+    }
   }
 
   void _sortMessages() {
-    // Ensure accurate timing-based ordering
     _messages.sort((a, b) {
       final aTime = DateTime.parse(a['created_at']).toLocal();
       final bTime = DateTime.parse(b['created_at']).toLocal();
@@ -155,12 +240,7 @@ class ChatController with ChangeNotifier {
 
     try {
       final currentUserId = Supabase.instance.client.auth.currentUser?.id;
-      if (currentUserId == null) {
-        debugPrint('ChatController: Cannot send, user not logged in');
-        return;
-      }
-
-      debugPrint('ChatController: Sending message to room $roomId');
+      if (currentUserId == null) return;
 
       final response = await Supabase.instance.client
           .from('messages')
@@ -168,15 +248,11 @@ class ChatController with ChangeNotifier {
             'sender_id': currentUserId,
             'room_id': roomId,
             'content': content.trim(),
+            'status': 'sent',
           })
           .select()
           .single();
 
-      debugPrint(
-        'ChatController: Message sent successfully: ${response['id']}',
-      );
-
-      // Optimistically add to UI immediately
       final alreadyExists = _messages.any(
         (m) => m['id'].toString() == response['id'].toString(),
       );
@@ -186,7 +262,6 @@ class ChatController with ChangeNotifier {
         notifyListeners();
       }
 
-      // Save to local DB
       try {
         await LocalDatabaseService.saveMessage(response);
       } catch (e) {

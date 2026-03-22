@@ -178,18 +178,27 @@ class _ChatViewState extends State<ChatView> {
                                     ),
                                   ),
                                   const SizedBox(height: 4),
-                                  Text(
-                                    DateFormat('hh:mm a').format(
-                                      DateTime.parse(message['created_at'])
-                                          .toLocal(),
-                                    ),
-                                    style: TextStyle(
-                                      color: isMe
-                                          ? Colors.white.withValues(alpha: 0.7)
-                                          : theme.textTheme.bodySmall?.color
-                                              ?.withValues(alpha: 0.5),
-                                      fontSize: 10,
-                                    ),
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        DateFormat('hh:mm a').format(
+                                          DateTime.parse(message['created_at'])
+                                              .toLocal(),
+                                        ),
+                                        style: TextStyle(
+                                          color: isMe
+                                              ? Colors.white.withValues(alpha: 0.7)
+                                              : theme.textTheme.bodySmall?.color
+                                                  ?.withValues(alpha: 0.5),
+                                          fontSize: 10,
+                                        ),
+                                      ),
+                                      if (isMe) ...[
+                                        const SizedBox(width: 4),
+                                        _buildStatusIcon(message['status'] ?? 'sent'),
+                                      ],
+                                    ],
                                   ),
                                 ],
                               ),
@@ -246,5 +255,29 @@ class _ChatViewState extends State<ChatView> {
         ],
       ),
     );
+  }
+
+  Widget _buildStatusIcon(String status) {
+    switch (status) {
+      case 'read':
+        return const Icon(
+          Icons.done_all,
+          size: 14,
+          color: Colors.blueAccent,
+        );
+      case 'delivered':
+        return const Icon(
+          Icons.done_all,
+          size: 14,
+          color: Colors.white70,
+        );
+      case 'sent':
+      default:
+        return const Icon(
+          Icons.done,
+          size: 14,
+          color: Colors.white70,
+        );
+    }
   }
 }

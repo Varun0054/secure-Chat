@@ -58,6 +58,9 @@ class DashboardController with ChangeNotifier {
 
     // 3. Setup FCM Token Generation
     await _setupFCMToken();
+
+    // 4. Setup Global Message Status Listener (for 'delivered' status)
+    _setupGlobalMessageListener();
   }
 
   Future<void> _setupFCMToken() async {
@@ -273,6 +276,39 @@ class DashboardController with ChangeNotifier {
     } catch (e) {
       debugPrint('Error rejecting request: $e');
     }
+  }
+
+  void _setupGlobalMessageListener() {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+
+    debugPrint('DashboardController: Setting up global message status listener');
+    
+    Supabase.instance.client
+        .channel('global-messages-service')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'messages',
+          callback: (payload) async {
+            final message = payload.newRecord;
+            if (message['sender_id'] != user.id && message['status'] == 'sent') {
+                debugPrint('GlobalListener: Marking message ${message['id']} as delivered');
+                try {
+                  await Supabase.instance.client
+                      .from('messages')
+                      .update({
+                        'status': 'delivered', 
+                        'delivered_at': DateTime.now().toIso8601String()
+                      })
+                      .eq('id', message['id']);
+                } catch (e) {
+                  debugPrint('GlobalListener ERR: $e');
+                }
+            }
+          },
+        )
+        .subscribe();
   }
 
   Future<void> logout(BuildContext context) async {

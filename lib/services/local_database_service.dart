@@ -16,8 +16,8 @@ class LocalDatabaseService {
       final dbPath = await getDatabasesPath();
       final path = join(dbPath, filePath);
       return await openDatabase(
-        path, 
-        version: 2, 
+        path,
+        version: 4,
         onCreate: _createDB,
         onUpgrade: _upgradeDB,
       );
@@ -44,6 +44,9 @@ class LocalDatabaseService {
         sender_id TEXT NOT NULL,
         content TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        status TEXT DEFAULT 'sent',
+        delivered_at TEXT,
+        read_at TEXT,
         FOREIGN KEY (room_id) REFERENCES rooms (id) ON DELETE CASCADE
       )
     ''');
@@ -53,6 +56,14 @@ class LocalDatabaseService {
       CREATE TABLE IF NOT EXISTS key_value_store (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      )
+    ''');
+
+    // User-Room map: remembers which roomId belongs to a pair of users
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS user_rooms (
+        friend_id TEXT PRIMARY KEY,
+        room_id TEXT NOT NULL
       )
     ''');
   }
@@ -66,6 +77,19 @@ class LocalDatabaseService {
         )
       ''');
     }
+    if (oldVersion < 3) {
+      await db.execute('ALTER TABLE messages ADD COLUMN status TEXT DEFAULT "sent"');
+      await db.execute('ALTER TABLE messages ADD COLUMN delivered_at TEXT');
+      await db.execute('ALTER TABLE messages ADD COLUMN read_at TEXT');
+    }
+    if (oldVersion < 4) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS user_rooms (
+          friend_id TEXT PRIMARY KEY,
+          room_id TEXT NOT NULL
+        )
+      ''');
+    }
   }
 
   /// Sanitize a message map to only include columns the SQLite schema supports.
@@ -76,6 +100,9 @@ class LocalDatabaseService {
       'sender_id': message['sender_id'],
       'content': message['content'],
       'created_at': message['created_at'],
+      'status': message['status'],
+      'delivered_at': message['delivered_at'],
+      'read_at': message['read_at'],
     };
   }
 
@@ -188,6 +215,43 @@ class LocalDatabaseService {
     await db.delete('messages');
     await db.delete('rooms');
     await db.delete('key_value_store');
+    await db.delete('user_rooms');
+  }
+
+  // --- User-Room Cache (offline room resolution) ---
+
+  /// Saves the roomId that a particular friend pair uses, for offline access.
+  static Future<void> saveUserRoom(String friendId, String roomId) async {
+    try {
+      final db = await database;
+      await db.insert(
+        'user_rooms',
+        {'friend_id': friendId, 'room_id': roomId},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      debugPrint('LocalDB: Cached room $roomId for friend $friendId');
+    } catch (e) {
+      debugPrint('LocalDB: Error caching user room: $e');
+    }
+  }
+
+  /// Returns the cached roomId for the given friendId, or null if not found.
+  static Future<String?> getUserRoom(String friendId) async {
+    try {
+      final db = await database;
+      final result = await db.query(
+        'user_rooms',
+        where: 'friend_id = ?',
+        whereArgs: [friendId],
+        limit: 1,
+      );
+      if (result.isNotEmpty) {
+        return result.first['room_id'] as String?;
+      }
+    } catch (e) {
+      debugPrint('LocalDB: Error fetching user room: $e');
+    }
+    return null;
   }
 
   // --- Key-Value Cache Operations ---

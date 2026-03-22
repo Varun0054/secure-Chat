@@ -213,7 +213,8 @@ class _DashboardViewState extends State<DashboardView> {
                                   _controller
                                       .getOrCreateRoom(friend['id'])
                                       .then((roomId) {
-                                        if (roomId != null && context.mounted) {
+                                        if (!context.mounted) return;
+                                        if (roomId != null) {
                                           Navigator.pushNamed(
                                             context,
                                             '/chat',
@@ -222,6 +223,17 @@ class _DashboardViewState extends State<DashboardView> {
                                               'id': friend['id'],
                                               'roomId': roomId,
                                             },
+                                          );
+                                        } else {
+                                          // Offline with no prior conversation cached
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            const SnackBar(
+                                              content: Text(
+                                                'You\'re offline. Open this chat online first to enable offline access.',
+                                              ),
+                                            ),
                                           );
                                         }
                                       });

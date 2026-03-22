@@ -16,13 +16,21 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:secure_chat/firebase_options.dart';
 import 'package:secure_chat/controller/theme_controller.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'secrets.dart';
 
 // ─── STEP 1: Top-level background message handler ────────────────────────────
 // MUST be a top-level function (not inside any class).
 // FCM calls this when the app is in the background or terminated.
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  try {
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+    }
+  } catch (e) {
+    // Ignore [core/duplicate-app] — Firebase may already be initialized natively.
+    debugPrint('FCM BG handler Firebase init (ignored): $e');
+  }
   debugPrint('FCM Background message: ${message.notification?.title}');
 }
 
@@ -42,59 +50,87 @@ const AndroidNotificationChannel _channel = AndroidNotificationChannel(
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+
+  // ─── STEP 2: Init Firebase safely (guard against native auto-init) ────────
+  // On Android, google-services.json causes the native SDK to auto-init Firebase
+  // before Dart runs. The [core/duplicate-app] error is thrown when we try to
+  // init again. We swallow that specific error so startup never crashes.
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  } catch (e) {
+    // [core/duplicate-app] means Firebase was already initialized — that's fine.
+    debugPrint('Firebase.initializeApp (ignored duplicate): $e');
+  }
 
   // ─── STEP 3: Register the background handler ─────────────────────────────
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
   // ─── STEP 4: Create the high-importance Android notification channel ──────
   // Without this, Android 8+ silently drops foreground notifications.
-  await flutterLocalNotificationsPlugin
-      .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>()
-      ?.createNotificationChannel(_channel);
+  try {
+    await flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(_channel);
+  } catch (e) {
+    debugPrint('Notification channel creation error (ignored): $e');
+  }
 
   // ─── STEP 5: Init local notifications plugin ─────────────────────────────
-  const InitializationSettings initSettings = InitializationSettings(
-    android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-  );
-  await flutterLocalNotificationsPlugin.initialize(
-    settings: initSettings,
-    onDidReceiveNotificationResponse: (NotificationResponse details) {
-      debugPrint('Notification tapped: ${details.payload}');
-    },
-  );
+  try {
+    const InitializationSettings initSettings = InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    );
+    await flutterLocalNotificationsPlugin.initialize(
+      settings: initSettings,
+      onDidReceiveNotificationResponse: (NotificationResponse details) {
+        debugPrint('Notification tapped: ${details.payload}');
+      },
+    );
+  } catch (e) {
+    debugPrint('Local notifications init error (ignored): $e');
+  }
 
   // ─── STEP 6: Show foreground FCM messages as visible banners ─────────────
   FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
     final notification = message.notification;
     final android = message.notification?.android;
     if (notification != null && android != null) {
-      await flutterLocalNotificationsPlugin.show(
-        id: notification.hashCode,
-        title: notification.title,
-        body: notification.body,
-        notificationDetails: NotificationDetails(
-          android: AndroidNotificationDetails(
-            _channel.id,
-            _channel.name,
-            channelDescription: _channel.description,
-            importance: Importance.high,
-            priority: Priority.high,
-            icon: '@mipmap/ic_launcher',
+      try {
+        await flutterLocalNotificationsPlugin.show(
+          id: notification.hashCode,
+          title: notification.title,
+          body: notification.body,
+          notificationDetails: NotificationDetails(
+            android: AndroidNotificationDetails(
+              _channel.id,
+              _channel.name,
+              channelDescription: _channel.description,
+              importance: Importance.high,
+              priority: Priority.high,
+              icon: '@mipmap/ic_launcher',
+            ),
           ),
-        ),
-      );
+        );
+      } catch (e) {
+        debugPrint('Show notification error (ignored): $e');
+      }
     }
   });
 
-  await Supabase.initialize(
-    url: 'https://qcrruzhpumgyqewhcwup.supabase.co',
-    anonKey: 'sb_publishable_94pQ5A1ErMtzYqKXeKA-7w_FrgTw5sY',
-  );
+  // ─── STEP 7: Init Supabase ────────────────────────────────────────────────
+  try {
+    await Supabase.initialize(
+      url: AppSecrets.supabaseUrl,
+      anonKey: AppSecrets.supabaseAnonKey,
+    );
+  } catch (e) {
+    debugPrint('Supabase init error: $e');
+    // App can still run offline — continue.
+  }
+
   runApp(const MyApp());
 }
 

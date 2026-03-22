@@ -3,6 +3,7 @@
 import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
+import 'secrets.dart';
 
 /// Default [FirebaseOptions] for use with your Firebase apps.
 ///
@@ -47,7 +48,7 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'AIzaSyBrWY2vubzBJHMe3jpQSkf2fhuSLadm4bk',
+    apiKey: AppSecrets.firebaseWebApiKey,
     appId: '1:763041501773:web:3f5a1646f430f5a5934204',
     messagingSenderId: '763041501773',
     projectId: 'chat-3b0e1',
@@ -57,7 +58,7 @@ class DefaultFirebaseOptions {
   );
 
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyDQEjAzEoi1RoqUc009aNvOS3T4hfVio90',
+    apiKey: AppSecrets.firebaseAndroidApiKey,
     appId: '1:763041501773:android:6784e104b832d116934204',
     messagingSenderId: '763041501773',
     projectId: 'chat-3b0e1',
@@ -65,7 +66,7 @@ class DefaultFirebaseOptions {
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyB-tuN_63nRZlTS9nJVNXVOnFSrqtuUUwE',
+    apiKey: AppSecrets.firebaseIosApiKey,
     appId: '1:763041501773:ios:4760d35c331fa3b2934204',
     messagingSenderId: '763041501773',
     projectId: 'chat-3b0e1',
